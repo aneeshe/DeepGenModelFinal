@@ -89,6 +89,7 @@ class PrimitiveShapeField(ABC):
         """Update positions based on velocities and timestep"""
         if self.velocities is not None:
             self.centers = self.centers + self.velocities * dt
+            print(f"Updating sphere positions: \nOld: {self.centers}\nNew: {self.centers + self.velocities * dt}")
             
     def check_bounds(self, limits):
         """Check if primitives are within bounds and handle boundary conditions"""
@@ -576,6 +577,12 @@ class ObjectField(PrimitiveShapeField):
 
     def __repr__(self):
         return f"ObjectField(fields={self.fields})"
+   
+    def update_positions(self, dt):
+        """Update positions of all fields"""
+        for field in self.fields:
+            if hasattr(field, 'update_positions'):
+                field.update_positions(dt)
 
     def set_position_orientation(self, pos=None, ori=None):
         if pos is not None:

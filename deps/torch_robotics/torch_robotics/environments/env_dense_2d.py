@@ -11,7 +11,6 @@ from torch_robotics.visualizers.planning_visualizer import create_fig_and_axes
 
 
 class EnvDense2D(EnvBase):
-
     def __init__(self,
                  name='EnvDense2D',
                  tensor_args=None,
@@ -19,48 +18,44 @@ class EnvDense2D(EnvBase):
                  sdf_cell_size=0.005,
                  **kwargs
                  ):
+        # Create moving spheres (dynamic obstacles)
+        moving_spheres = MultiSphereField(
+            centers=np.array([[-0.43, 0.33], [0.33, 0.62]]),
+            radii=np.array([0.125, 0.125]),
+            velocities=np.array([[0.1, .2], [-0.1, .2]]),
+            tensor_args=tensor_args
+        )
 
-        sphere_centers = np.array([[-0.43, 0.33], [0.33, 0.62]])
-        sphere_radii = np.array([0.125, 0.125])
-        sphere_velocities = np.array([[0.1, 0.2], [-0.1, 0.2]])
-
-        obj_list = [
-            MultiSphereField(
-                sphere_centers,
-                sphere_radii,
-                velocities=sphere_velocities,
-                tensor_args=tensor_args
-            ),
-            MultiBoxField(
-                np.array(
+        static_boxes = MultiBoxField(
+            np.array(
                 [[0.607781708240509, 0.19512386620044708], [0.5575312972068787, 0.5508843064308167],
-                 [-0.3352295458316803, -0.6887519359588623], [-0.6572632193565369, 0.31827881932258606],
+                [-0.3352295458316803, -0.6887519359588623], [-0.6572632193565369, 0.31827881932258606],
                  [-0.664594292640686, -0.016457155346870422], [0.8165988922119141, -0.19856023788452148],
                  [-0.8222246170043945, -0.6448580026626587], [-0.2855989933013916, -0.36841487884521484],
                  [-0.8946458101272583, 0.8962447643280029], [-0.23994405567646027, 0.6021060943603516],
                  [-0.006193588487803936, 0.8456171751022339], [0.305103600025177, -0.3661990463733673],
                  [-0.10704007744789124, 0.1318950206041336], [0.7156378626823425, -0.6923345923423767]
-                 ]
-                ),
-                np.array(
+                ]
+            ),
+            np.array(
                 [[0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
-                 [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
+                [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
                  [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
                  [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
                  [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
                  [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224],
                  [0.20000000298023224, 0.20000000298023224], [0.20000000298023224, 0.20000000298023224]
-                 ]
-                )
-                ,
-                tensor_args=tensor_args
-                )
-        ]
+                ]
+            ),
+            tensor_args=tensor_args
+        )
+        
 
         super().__init__(
             name=name,
-            limits=torch.tensor([[-1, -1], [1, 1]], **tensor_args),  # environments limits
-            obj_fixed_list=[ObjectField(obj_list, 'dense2d')],
+            limits=torch.tensor([[-1, -1], [1, 1]], **tensor_args),
+            obj_fixed_list=[ObjectField([static_boxes], 'static')],  # Static objects
+            obj_extra_list=[ObjectField([moving_spheres], 'dynamic')],  # Dynamic objects
             precompute_sdf_obj_fixed=precompute_sdf_obj_fixed,
             sdf_cell_size=sdf_cell_size,
             tensor_args=tensor_args,
@@ -148,6 +143,9 @@ if __name__ == '__main__':
         # Clear the axis
         ax.clear()
         
+        # Print debug info
+        print(f"\nTimestep {t}")
+        
         # Render current state
         env.render(ax)
         ax.set_title(f'Time: {env.current_time:.1f}s')
@@ -158,16 +156,3 @@ if __name__ == '__main__':
         
         # Step environment
         env.step()
-    
-    plt.ioff()  # Disable interactive mode
-    plt.show()
-
-    # Optional: You can also visualize the SDF at any timestep
-    fig, ax = create_fig_and_axes(env.dim)
-    env.render_sdf(ax, fig)
-    plt.show()
-
-    # And the gradient of the SDF
-    fig, ax = create_fig_and_axes(env.dim)
-    env.render_grad_sdf(ax, fig)
-    plt.show()
