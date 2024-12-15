@@ -284,8 +284,13 @@ class EnvBase(ABC):
         for obj in self.obj_all_list:
             if hasattr(obj, 'update_positions'):
                 obj.update_positions(self.dt)
-                obj.check_bounds(self.limits)
-                
+                # Check bounds for each field in the ObjectField
+                if isinstance(obj, ObjectField):
+                    for field in obj.fields:  # Assuming ObjectField has a 'fields' attribute
+                        field.check_bounds(self.limits)
+                else:
+                    obj.check_bounds(self.limits)
+
     def reset(self):
         """Reset the environment to initial state"""
         self.current_time = 0.0

@@ -92,7 +92,7 @@ class PrimitiveShapeField(ABC):
             
     def check_bounds(self, limits):
         """Check if primitives are within bounds and handle boundary conditions"""
-        # Basic boundary check - could be made more sophisticated
+        print(f"Checking bounds for centers: {self.centers}")  # Debugging line
         for i in range(len(self.centers)):
             for dim in range(len(self.centers[i])):
                 if self.centers[i][dim] < limits[0][dim]:

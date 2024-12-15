@@ -22,7 +22,7 @@ class EnvDense2D(EnvBase):
 
         sphere_centers = np.array([[-0.43, 0.33], [0.33, 0.62]])
         sphere_radii = np.array([0.125, 0.125])
-        sphere_velocities = np.array([[0.1, 0.0], [-0.1, 0.0]])
+        sphere_velocities = np.array([[0.1, 0.2], [-0.1, 0.2]])
 
         obj_list = [
             MultiSphereField(
