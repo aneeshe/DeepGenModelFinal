@@ -108,7 +108,7 @@ def experiment(
     # Load dataset with env, robot, task
     train_subset, train_dataloader, val_subset, val_dataloader = get_dataset(
         dataset_class='TrajectoryDataset',
-        use_extra_objects=True,
+        use_extra_objects=False,
         obstacle_cutoff_margin=0.05,
         **args,
         tensor_args=tensor_args
@@ -367,6 +367,7 @@ def experiment(
         current_start = steps_to_execute[-1,:2].clone()
         
         print(f"Executed {n_execute_steps} steps, new start position: {current_start}")
+        # increase the execute_steps since the diffusion model will not converge if this is constant
         n_execute_steps *= 2
         # Plot the final free trajectory
         plt.figure(figsize=(10, 6))
@@ -419,16 +420,16 @@ def experiment(
     # After the loop ends, convert the accumulated executed trajectory into a tensor
     executed_traj = torch.tensor(executed_traj, device=device, dtype=torch.float32)
     traj_final_free_best = executed_traj
-    cost_smoothness = compute_smoothness(traj_final_free_best, robot)
-    print(f'best cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
+    # cost_smoothness = compute_smoothness(traj_final_free_best, robot)
+    # print(f'best cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
 
-    cost_path_length = compute_path_length(traj_final_free_best, robot)
-    print(f'best cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
-    cost_best_free_traj = cost_path_length + cost_smoothness
-    print(f'cost best: {cost_all.item():.3f}')
+    # cost_path_length = compute_path_length(traj_final_free_best, robot)
+    # print(f'best cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
+    # cost_best_free_traj = cost_path_length + cost_smoothness
+    # print(f'cost best: {cost_all.item():.3f}')
     ########################################################################################################################
     # Save data
-    results_data_dict['cost_best_free_traj'] = cost_best_free_traj
+    # results_data_dict['cost_best_free_traj'] = cost_best_free_traj
     results_data_dict['traj_final_free_best'] = traj_final_free_best
     with open(os.path.join(results_dir, 'results_data_dict.pickle'), 'wb') as handle:
         pickle.dump(results_data_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
