@@ -24,21 +24,23 @@ from torch_robotics.torch_utils.torch_utils import get_torch_device, freeze_torc
 from torch_robotics.trajectory.metrics import compute_smoothness, compute_path_length, compute_variance_waypoints
 from torch_robotics.trajectory.utils import interpolate_traj_via_points
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
+import matplotlib.pyplot as plt
+import numpy as np
 
 allow_ops_in_compiled_graph()
 
 
-TRAINED_MODELS_DIR = '../../data_trained_models/'
+TRAINED_MODELS_DIR = 'data_trained_models/'
 
 
 @single_experiment_yaml
 def experiment(
     ########################################################################################################################
     # Experiment configuration
-    # model_id: str = 'EnvDense2D-RobotPointMass',
+    model_id: str = 'EnvDense2D-RobotPointMass',
     # model_id: str = 'EnvNarrowPassageDense2D-RobotPointMass',
     # model_id: str = 'EnvSimple2D-RobotPointMass',
-    model_id: str = 'EnvSpheres3D-RobotPanda',
+    # model_id: str = 'EnvSpheres3D-RobotPanda',
 
     # planner_alg: str = 'diffusion_prior',
     # planner_alg: str = 'diffusion_prior_then_guide',
@@ -242,112 +244,192 @@ def experiment(
         t_start_guide=t_start_guide,
         noise_std_extra_schedule_fn=lambda x: 0.5,
     )
+    # Set loop parameters
+    distance_threshold = 0.1  # Distance threshold, adjust as needed
+    n_execute_steps = 8       # Number of steps to execute in each iteration
+    print('total_n', n_support_points, 'exec_n', n_execute_steps)
+    max_iterations = 100       # Maximum number of iterations to prevent infinite loops
+    iteration = 0              # Iteration counter
 
-    ########
-    # Sample trajectories with the diffusion/cvae model
-    with TimerCUDA() as timer_model_sampling:
-        trajs_normalized_iters = model.run_inference(
-            context, hard_conds,
-            n_samples=n_samples, horizon=n_support_points,
-            return_chain=True,
-            sample_fn=ddpm_sample_fn,
-            **sample_fn_kwargs,
-            n_diffusion_steps_without_noise=n_diffusion_steps_without_noise,
-            # ddim=True
-        )
-    print(f't_model_sampling: {timer_model_sampling.elapsed:.3f} sec')
-    t_total = timer_model_sampling.elapsed
+    # Initialize the current start point
+    current_start = start_state_pos.clone()
 
-    ########
-    # run extra guiding steps without diffusion
-    if run_prior_then_guidance:
-        n_post_diffusion_guide_steps = (t_start_guide + n_diffusion_steps_without_noise) * n_guide_steps
-        with TimerCUDA() as timer_post_model_sample_guide:
-            trajs = trajs_normalized_iters[-1]
-            trajs_post_diff_l = []
-            for i in range(n_post_diffusion_guide_steps):
-                trajs = guide_gradient_steps(
-                    trajs,
-                    hard_conds=hard_conds,
-                    guide=guide,
-                    n_guide_steps=1,
-                    unnormalize_data=False
-                )
-                trajs_post_diff_l.append(trajs)
+    # 创建两个 0 的张量
+    zeros_to_add = torch.zeros((1, 2), device = device)  # 形状 [1, 2]
 
-            chain = torch.stack(trajs_post_diff_l, dim=1)
-            chain = einops.rearrange(chain, 'b post_diff_guide_steps h d -> post_diff_guide_steps b h d')
-            trajs_normalized_iters = torch.cat((trajs_normalized_iters, chain))
-        print(f't_post_diffusion_guide: {timer_post_model_sample_guide.elapsed:.3f} sec')
-        t_total = timer_model_sampling.elapsed + timer_post_model_sample_guide.elapsed
+    # Initialize the executed trajectory
+    executed_traj = torch.cat((current_start.view(1, -1), zeros_to_add), dim=1)
 
-    # unnormalize trajectory samples from the models
-    trajs_iters = dataset.unnormalize_trajectories(trajs_normalized_iters)
+    # Enter the loop
+    while iteration < max_iterations and current_start is not None:
+        iteration += 1
+        print(f"\n===== Iteration {iteration} =====")
+        
+        # Compute the distance between the current start point and the goal
+        dist_to_goal = torch.linalg.norm(current_start - goal_state_pos).item()
+        print(f"Distance to goal: {dist_to_goal:.4f}")
+        
+        if dist_to_goal < distance_threshold:
+            print("Reached close enough to the goal!")
+            break
+        
+        # Normalize the current start point and goal
+        hard_conds = dataset.get_hard_conditions(torch.vstack((current_start, goal_state_pos)), normalize=True)
+        context = None
+        ########
+        # Sample trajectories with the diffusion/cvae model
+        with TimerCUDA() as timer_model_sampling:
+            trajs_normalized_iters = model.run_inference(
+                context, hard_conds,
+                n_samples=n_samples, horizon=n_support_points,
+                return_chain=True,
+                sample_fn=ddpm_sample_fn,
+                **sample_fn_kwargs,
+                n_diffusion_steps_without_noise=n_diffusion_steps_without_noise,
+                # ddim=True
+            )
+        print(f't_model_sampling: {timer_model_sampling.elapsed:.3f} sec')
+        t_total = timer_model_sampling.elapsed
+        print('trajs_shape', trajs_normalized_iters.shape)
+        ########
+        # run extra guiding steps without diffusion
+        if run_prior_then_guidance:
+            n_post_diffusion_guide_steps = (t_start_guide + n_diffusion_steps_without_noise) * n_guide_steps
+            with TimerCUDA() as timer_post_model_sample_guide:
+                trajs = trajs_normalized_iters[-1]
+                trajs_post_diff_l = []
+                for i in range(n_post_diffusion_guide_steps):
+                    trajs = guide_gradient_steps(
+                        trajs,
+                        hard_conds=hard_conds,
+                        guide=guide,
+                        n_guide_steps=1,
+                        unnormalize_data=False
+                    )
+                    trajs_post_diff_l.append(trajs)
 
-    trajs_final = trajs_iters[-1]
-    trajs_final_coll, trajs_final_coll_idxs, trajs_final_free, trajs_final_free_idxs, _ = task.get_trajs_collision_and_free(trajs_final, return_indices=True)
+                chain = torch.stack(trajs_post_diff_l, dim=1)
+                chain = einops.rearrange(chain, 'b post_diff_guide_steps h d -> post_diff_guide_steps b h d')
+                trajs_normalized_iters = torch.cat((trajs_normalized_iters, chain))
+            print(f't_post_diffusion_guide: {timer_post_model_sample_guide.elapsed:.3f} sec')
+            t_total = timer_model_sampling.elapsed + timer_post_model_sample_guide.elapsed
 
-    ########################################################################################################################
-    # Compute motion planning metrics
-    print(f'\n----------------METRICS----------------')
-    print(f't_total: {t_total:.3f} sec')
+        # unnormalize trajectory samples from the models
+        trajs_iters = dataset.unnormalize_trajectories(trajs_normalized_iters)
 
-    success_free_trajs = task.compute_success_free_trajs(trajs_final)
-    fraction_free_trajs = task.compute_fraction_free_trajs(trajs_final)
-    collision_intensity_trajs = task.compute_collision_intensity_trajs(trajs_final)
+        trajs_final = trajs_iters[-1]
+        trajs_final_coll, trajs_final_coll_idxs, trajs_final_free, trajs_final_free_idxs, _ = task.get_trajs_collision_and_free(trajs_final, return_indices=True)
 
-    print(f'success: {success_free_trajs}')
-    print(f'percentage free trajs: {fraction_free_trajs*100:.2f}')
-    print(f'percentage collision intensity: {collision_intensity_trajs*100:.2f}')
+        ########################################################################################################################
+        # Compute motion planning metrics
+        print(f'\n----------------METRICS----------------')
+        print(f't_total: {t_total:.3f} sec')
 
-    # compute costs only on collision-free trajectories
-    traj_final_free_best = None
-    idx_best_traj = None
-    cost_best_free_traj = None
-    cost_smoothness = None
-    cost_path_length = None
-    cost_all = None
-    variance_waypoint_trajs_final_free = None
-    if trajs_final_free is not None:
-        cost_smoothness = compute_smoothness(trajs_final_free, robot)
-        print(f'cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
+        success_free_trajs = task.compute_success_free_trajs(trajs_final)
+        fraction_free_trajs = task.compute_fraction_free_trajs(trajs_final)
+        collision_intensity_trajs = task.compute_collision_intensity_trajs(trajs_final)
 
-        cost_path_length = compute_path_length(trajs_final_free, robot)
-        print(f'cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
+        print(f'success: {success_free_trajs}')
+        print(f'percentage free trajs: {fraction_free_trajs*100:.2f}')
+        print(f'percentage collision intensity: {collision_intensity_trajs*100:.2f}')
 
-        # compute best trajectory
-        cost_all = cost_path_length + cost_smoothness
-        idx_best_traj = torch.argmin(cost_all).item()
-        traj_final_free_best = trajs_final_free[idx_best_traj]
-        cost_best_free_traj = torch.min(cost_all).item()
-        print(f'cost best: {cost_best_free_traj:.3f}')
+        # compute costs only on collision-free trajectories
+        traj_final_free_best = None
+        idx_best_traj = None
+        cost_best_free_traj = None
+        cost_smoothness = None
+        cost_path_length = None
+        cost_all = None
+        variance_waypoint_trajs_final_free = None
+        if trajs_final_free is not None:
+            cost_smoothness = compute_smoothness(trajs_final_free, robot)
+            print(f'cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
 
-        # variance of waypoints
-        variance_waypoint_trajs_final_free = compute_variance_waypoints(trajs_final_free, robot)
-        print(f'variance waypoint: {variance_waypoint_trajs_final_free:.4f}')
+            cost_path_length = compute_path_length(trajs_final_free, robot)
+            print(f'cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
 
+            # compute best trajectory
+            cost_all = cost_path_length + cost_smoothness
+            idx_best_traj = torch.argmin(cost_all).item()
+            traj_final_free_best = trajs_final_free[idx_best_traj]
+            cost_best_free_traj = torch.min(cost_all).item()
+            print(f'cost best: {cost_best_free_traj:.3f}')
+
+            # variance of waypoints
+            variance_waypoint_trajs_final_free = compute_variance_waypoints(trajs_final_free, robot)
+            print(f'variance waypoint: {variance_waypoint_trajs_final_free:.4f}')
+        # Select the first n steps
+        steps_to_execute = traj_final_free_best[1:n_execute_steps]
+        executed_traj = torch.cat((executed_traj, steps_to_execute), dim=0)
+
+        
+        # Update the current start point to the last point of the executed steps
+        current_start = steps_to_execute[-1,:2].clone()
+        
+        print(f"Executed {n_execute_steps} steps, new start position: {current_start}")
+        n_execute_steps *= 2
+        # Plot the final free trajectory
+        plt.figure(figsize=(10, 6))
+        plt.plot(traj_final_free_best[:, 0].cpu(), traj_final_free_best[:, 1].cpu(), label="traj_final_free_best", linestyle='--', marker='o')
+
+        # Highlight the executed trajectory
+        if len(executed_traj) > 0:
+            plt.plot(executed_traj[:,0].cpu(), executed_traj[:,1].cpu(), label="executed_traj", linestyle='-', marker='x')
+
+        # Mark the starting and ending points
+        plt.scatter(traj_final_free_best[0, 0].cpu(), traj_final_free_best[0, 1].cpu(), color='green', label='Start Point', zorder=5)
+        plt.scatter(traj_final_free_best[-1, 0].cpu(), traj_final_free_best[-1, 1].cpu(), color='red', label='End Point', zorder=5)
+
+        # Annotate current start point if available
+        if 'current_start' in locals():
+            plt.scatter(current_start[0].cpu(), current_start[1].cpu(), color='blue', label='Current Start', zorder=5)
+
+        # Add titles, labels, and legend
+        plt.title("Trajectory Visualization")
+        plt.xlabel("X-coordinate")
+        plt.ylabel("Y-coordinate")
+        plt.legend()
+        plt.grid()
+
+        # save the plot
+        save_path = f"trajectory_plot_iteration_{iteration}.png"
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved: {save_path}")
+        
+        if iteration == 1:
+            results_data_dict = {
+                'trajs_iters': trajs_iters,
+                'trajs_final_coll': trajs_final_coll,
+                'trajs_final_coll_idxs': trajs_final_coll_idxs,
+                'trajs_final_free': trajs_final_free,
+                'trajs_final_free_idxs': trajs_final_free_idxs,
+                'success_free_trajs': success_free_trajs,
+                'fraction_free_trajs': fraction_free_trajs,
+                'collision_intensity_trajs': collision_intensity_trajs,
+                'idx_best_traj': idx_best_traj,
+                'traj_final_free_best': traj_final_free_best,
+                'cost_best_free_traj': cost_best_free_traj,
+                'cost_path_length_trajs_final_free': cost_smoothness,
+                'cost_smoothness_trajs_final_free': cost_path_length,
+                'cost_all_trajs_final_free': cost_all,
+                'variance_waypoint_trajs_final_free': variance_waypoint_trajs_final_free,
+                't_total': t_total
+            }
     print(f'\n--------------------------------------\n')
+    # After the loop ends, convert the accumulated executed trajectory into a tensor
+    executed_traj = torch.tensor(executed_traj, device=device, dtype=torch.float32)
+    traj_final_free_best = executed_traj
+    cost_smoothness = compute_smoothness(traj_final_free_best, robot)
+    print(f'best cost smoothness: {cost_smoothness.mean():.4f}, {cost_smoothness.std():.4f}')
 
+    cost_path_length = compute_path_length(traj_final_free_best, robot)
+    print(f'best cost path length: {cost_path_length.mean():.4f}, {cost_path_length.std():.4f}')
+    cost_best_free_traj = cost_path_length + cost_smoothness
+    print(f'cost best: {cost_all.item():.3f}')
     ########################################################################################################################
     # Save data
-    results_data_dict = {
-        'trajs_iters': trajs_iters,
-        'trajs_final_coll': trajs_final_coll,
-        'trajs_final_coll_idxs': trajs_final_coll_idxs,
-        'trajs_final_free': trajs_final_free,
-        'trajs_final_free_idxs': trajs_final_free_idxs,
-        'success_free_trajs': success_free_trajs,
-        'fraction_free_trajs': fraction_free_trajs,
-        'collision_intensity_trajs': collision_intensity_trajs,
-        'idx_best_traj': idx_best_traj,
-        'traj_final_free_best': traj_final_free_best,
-        'cost_best_free_traj': cost_best_free_traj,
-        'cost_path_length_trajs_final_free': cost_smoothness,
-        'cost_smoothness_trajs_final_free': cost_path_length,
-        'cost_all_trajs_final_free': cost_all,
-        'variance_waypoint_trajs_final_free': variance_waypoint_trajs_final_free,
-        't_total': t_total
-    }
+    results_data_dict['cost_best_free_traj'] = cost_best_free_traj
+    results_data_dict['traj_final_free_best'] = traj_final_free_best
     with open(os.path.join(results_dir, 'results_data_dict.pickle'), 'wb') as handle:
         pickle.dump(results_data_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
