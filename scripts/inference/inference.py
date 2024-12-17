@@ -24,6 +24,8 @@ from torch_robotics.torch_utils.torch_utils import get_torch_device, freeze_torc
 from torch_robotics.trajectory.metrics import compute_smoothness, compute_path_length, compute_variance_waypoints
 from torch_robotics.trajectory.utils import interpolate_traj_via_points
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
+from torch_robotics.visualizers.planning_visualizer import create_fig_and_axes
+from torch_robotics.tasks.tasks import PlanningTask
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -183,67 +185,6 @@ def experiment(
     hard_conds = dataset.get_hard_conditions(torch.vstack((start_state_pos, goal_state_pos)), normalize=True)
     context = None
 
-    ########
-    # Set up the planning costs
-
-    # Cost collisions
-    cost_collision_l = []
-    weights_grad_cost_l = []  # for guidance, the weights_cost_l are the gradient multipliers (after gradient clipping)
-    if use_guide_on_extra_objects_only:
-        collision_fields = task.get_collision_fields_extra_objects()
-    else:
-        collision_fields = task.get_collision_fields()
-
-    for collision_field in collision_fields:
-        cost_collision_l.append(
-            CostCollision(
-                robot, n_support_points,
-                field=collision_field,
-                sigma_coll=1.0,
-                tensor_args=tensor_args
-            )
-        )
-        weights_grad_cost_l.append(weight_grad_cost_collision)
-
-    # Cost smoothness
-    cost_smoothness_l = [
-        CostGPTrajectory(
-            robot, n_support_points, dt, sigma_gp=1.0,
-            tensor_args=tensor_args
-        )
-    ]
-    weights_grad_cost_l.append(weight_grad_cost_smoothness)
-
-    ####### Cost composition
-    cost_func_list = [
-        *cost_collision_l,
-        *cost_smoothness_l
-    ]
-
-    cost_composite = CostComposite(
-        robot, n_support_points, cost_func_list,
-        weights_cost_l=weights_grad_cost_l,
-        tensor_args=tensor_args
-    )
-
-    ########
-    # Guiding manager
-    guide = GuideManagerTrajectoriesWithVelocity(
-            dataset,
-            cost_composite,
-            clip_grad=True,
-            interpolate_trajectories_for_collision=True,
-            num_interpolated_points=ceil(n_support_points * factor_num_interpolated_points_for_collision),
-            tensor_args=tensor_args,
-    )
-
-    t_start_guide = ceil(start_guide_steps_fraction * model.n_diffusion_steps)
-    sample_fn_kwargs = dict(
-        guide=None if run_prior_then_guidance or run_prior_only else guide,
-        n_guide_steps=n_guide_steps,
-        t_start_guide=t_start_guide,
-        noise_std_extra_schedule_fn=lambda x: 0.5,
-    )
     # Set loop parameters
     distance_threshold = 0.1  # Distance threshold, adjust as needed
     n_execute_steps = 8       # Number of steps to execute in each iteration
@@ -265,6 +206,68 @@ def experiment(
         iteration += 1
         print(f"\n===== Iteration {iteration} =====")
         
+        ########
+        # Set up the planning costs
+
+        # Cost collisions
+        cost_collision_l = []
+        weights_grad_cost_l = []  # for guidance, the weights_cost_l are the gradient multipliers (after gradient clipping)
+        if use_guide_on_extra_objects_only:
+            collision_fields = task.get_collision_fields_extra_objects()
+        else:
+            collision_fields = task.get_collision_fields()
+
+        for collision_field in collision_fields:
+            cost_collision_l.append(
+                CostCollision(
+                    robot, n_support_points,
+                    field=collision_field,
+                    sigma_coll=1.0,
+                    tensor_args=tensor_args
+                )
+            )
+            weights_grad_cost_l.append(weight_grad_cost_collision)
+
+        # Cost smoothness
+        cost_smoothness_l = [
+            CostGPTrajectory(
+                robot, n_support_points, dt, sigma_gp=1.0,
+                tensor_args=tensor_args
+            )
+        ]
+        weights_grad_cost_l.append(weight_grad_cost_smoothness)
+
+        ####### Cost composition
+        cost_func_list = [
+            *cost_collision_l,
+            *cost_smoothness_l
+        ]
+
+        cost_composite = CostComposite(
+            robot, n_support_points, cost_func_list,
+            weights_cost_l=weights_grad_cost_l,
+            tensor_args=tensor_args
+        )
+
+        ########
+        # Guiding manager
+        guide = GuideManagerTrajectoriesWithVelocity(
+                dataset,
+                cost_composite,
+                clip_grad=True,
+                interpolate_trajectories_for_collision=True,
+                num_interpolated_points=ceil(n_support_points * factor_num_interpolated_points_for_collision),
+                tensor_args=tensor_args,
+        )
+
+        t_start_guide = ceil(start_guide_steps_fraction * model.n_diffusion_steps)
+        sample_fn_kwargs = dict(
+            guide=None if run_prior_then_guidance or run_prior_only else guide,
+            n_guide_steps=n_guide_steps,
+            t_start_guide=t_start_guide,
+            noise_std_extra_schedule_fn=lambda x: 0.5,
+        )
+
         # Compute the distance between the current start point and the goal
         dist_to_goal = torch.linalg.norm(current_start - goal_state_pos).item()
         print(f"Distance to goal: {dist_to_goal:.4f}")
@@ -367,36 +370,47 @@ def experiment(
         current_start = steps_to_execute[-1,:2].clone()
         
         print(f"Executed {n_execute_steps} steps, new start position: {current_start}")
-        # increase the execute_steps since the diffusion model will not converge if this is constant
-        n_execute_steps *= 2
+
         # Plot the final free trajectory
-        plt.figure(figsize=(10, 6))
-        plt.plot(traj_final_free_best[:, 0].cpu(), traj_final_free_best[:, 1].cpu(), label="traj_final_free_best", linestyle='--', marker='o')
+        fig, ax = create_fig_and_axes(env.dim)
+
+        # Clear the axis
+        ax.clear()
+        # Render current state
+        env.render(ax)
+        ax.set_title(f'Time: {env.current_time:.1f}s')
+
+        # Plot the final free trajectory
+        ax.plot(traj_final_free_best[:, 0].cpu(), traj_final_free_best[:, 1].cpu(), 
+                label="traj_final_free_best", linestyle='--', marker='o')
 
         # Highlight the executed trajectory
         if len(executed_traj) > 0:
-            plt.plot(executed_traj[:,0].cpu(), executed_traj[:,1].cpu(), label="executed_traj", linestyle='-', marker='x')
+            ax.plot(executed_traj[:, 0].cpu(), executed_traj[:, 1].cpu(), 
+                    label="executed_traj", linestyle='-', marker='x')
 
         # Mark the starting and ending points
-        plt.scatter(traj_final_free_best[0, 0].cpu(), traj_final_free_best[0, 1].cpu(), color='green', label='Start Point', zorder=5)
-        plt.scatter(traj_final_free_best[-1, 0].cpu(), traj_final_free_best[-1, 1].cpu(), color='red', label='End Point', zorder=5)
+        ax.scatter(traj_final_free_best[0, 0].cpu(), traj_final_free_best[0, 1].cpu(), 
+                color='green', label='Start Point', zorder=5)
+        ax.scatter(traj_final_free_best[-1, 0].cpu(), traj_final_free_best[-1, 1].cpu(), 
+                color='red', label='End Point', zorder=5)
 
         # Annotate current start point if available
         if 'current_start' in locals():
-            plt.scatter(current_start[0].cpu(), current_start[1].cpu(), color='blue', label='Current Start', zorder=5)
+            ax.scatter(current_start[0].cpu(), current_start[1].cpu(), 
+                    color='blue', label='Current Start', zorder=5)
 
         # Add titles, labels, and legend
-        plt.title("Trajectory Visualization")
-        plt.xlabel("X-coordinate")
-        plt.ylabel("Y-coordinate")
-        plt.legend()
-        plt.grid()
+        ax.set_title("Trajectory Visualization")
+        ax.set_xlabel("X-coordinate")
+        ax.set_ylabel("Y-coordinate")
+        ax.legend()
+        ax.grid()
 
-        # save the plot
+        # Save the plot
         save_path = f"trajectory_plot_iteration_{iteration}.png"
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved: {save_path}")
-        
         if iteration == 1:
             results_data_dict = {
                 'trajs_iters': trajs_iters,
@@ -416,6 +430,13 @@ def experiment(
                 'variance_waypoint_trajs_final_free': variance_waypoint_trajs_final_free,
                 't_total': t_total
             }
+        # Update the env
+        delta_t = dt * (n_execute_steps - 1)
+        env.step(dt = delta_t)
+        # Update the task
+        task = PlanningTask(env=env, robot=robot, tensor_args=tensor_args, **dataset.args)
+        # increase the execute_steps since the diffusion model will not converge if this is constant
+        n_execute_steps *= 2
     print(f'\n--------------------------------------\n')
     # After the loop ends, convert the accumulated executed trajectory into a tensor
     executed_traj = torch.tensor(executed_traj, device=device, dtype=torch.float32)
