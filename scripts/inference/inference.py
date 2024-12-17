@@ -437,6 +437,9 @@ def experiment(
         task = PlanningTask(env=env, robot=robot, tensor_args=tensor_args, **dataset.args)
         # increase the execute_steps since the diffusion model will not converge if this is constant
         n_execute_steps *= 2
+        # n_support_points -= n_execute_steps - 1
+        # dataset.n_support_points = n_support_points
+        # dataset.trajectory_dim = (n_support_points, dataset.state_dim)
     print(f'\n--------------------------------------\n')
     # After the loop ends, convert the accumulated executed trajectory into a tensor
     executed_traj = torch.tensor(executed_traj, device=device, dtype=torch.float32)
