@@ -277,8 +277,9 @@ class EnvBase(ABC):
     def get_chomp_params(self, robot=None):
         raise NotImplementedError
 
-    def step(self):
+    def step(self, dt = self.dt):
         """Step the environment forward in time"""
+        self.dt = dt
         self.current_time += self.dt
         # Update positions of all dynamic objects
         for obj in self.obj_all_list:
