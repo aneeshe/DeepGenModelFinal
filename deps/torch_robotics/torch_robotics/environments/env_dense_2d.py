@@ -22,7 +22,7 @@ class EnvDense2D(EnvBase):
         moving_spheres = MultiSphereField(
             centers=np.array([[-0.43, 0.33], [0.33, 0.62]]),
             radii=np.array([0.125, 0.125]),
-            velocities=np.array([[0.1, .2], [-0.1, .2]]),
+            velocities=np.array([[0.1, -0.1], [-0.1, .2]]),
             tensor_args=tensor_args
         )
 
