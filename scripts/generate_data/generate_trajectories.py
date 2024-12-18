@@ -1,27 +1,84 @@
 import os
 import pickle
 import time
+import numpy as np
+import sys
 
 import torch
 import yaml
 from matplotlib import pyplot as plt
 
-from experiment_launcher import single_experiment_yaml, run_experiment
-from experiment_launcher.utils import fix_random_seed
-from mp_baselines.planners.gpmp2 import GPMP2
-from mp_baselines.planners.hybrid_planner import HybridPlanner
-from mp_baselines.planners.multi_sample_based_planner import MultiSampleBasedPlanner
-from mp_baselines.planners.rrt_connect import RRTConnect
 from torch_robotics import environments, robots
 from torch_robotics.tasks.tasks import PlanningTask
 from torch_robotics.visualizers.planning_visualizer import PlanningVisualizer
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../../../.."))  # Go up 5 levels
 
-def generate_collision_free_trajectories(
+print("Current directory:", current_dir)
+print("Project root directory:", project_root)
+
+# Add project root to the Python path
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+print("Starting imports...")
+
+# Debug: Try to find the actual module containing these functions
+import deps.experiment_launcher.experiment_launcher as experiment_launcher
+print("Contents of experiment_launcher:", dir(experiment_launcher))
+
+try:
+    # Import directly from decorators module
+    from deps.experiment_launcher.experiment_launcher.decorators import single_experiment_yaml
+    from deps.experiment_launcher.experiment_launcher.launcher import run_experiment
+except ImportError as e:
+    print("ImportError:", e)
+    print("Check if the module path is correct and if there are circular dependencies.")
+    raise
+
+print("Imports successful.")
+
+from deps.experiment_launcher.experiment_launcher.utils import fix_random_seed
+from deps.motion_planning_baselines.mp_baselines.planners.gpmp2 import GPMP2
+from deps.motion_planning_baselines.mp_baselines.planners.hybrid_planner import HybridPlanner
+from deps.motion_planning_baselines.mp_baselines.planners.multi_sample_based_planner import MultiSampleBasedPlanner
+from deps.motion_planning_baselines.mp_baselines.planners.rrt_connect import RRTConnect
+
+
+
+def get_obstacle_states_from_env(env):
+    """Fallback method to get obstacle states from environment"""
+    if hasattr(env, 'get_obstacle_states'):
+        return env.get_obstacle_states()
+    
+    # Fallback: manually collect from obj_extra_list
+    obstacle_states = {'positions': [], 'velocities': []}
+    
+    if hasattr(env, 'obj_extra_list') and env.obj_extra_list is not None:
+        for obj in env.obj_extra_list:
+            if hasattr(obj, 'fields'):
+                for field in obj.fields:
+                    if hasattr(field, 'centers'):  # For spheres and other primitives
+                        obstacle_states['positions'].append(field.centers)
+                        if hasattr(field, 'velocities'):
+                            obstacle_states['velocities'].append(field.velocities)
+    
+    # Convert lists to tensors if any obstacles were found
+    if len(obstacle_states['positions']) > 0:
+        obstacle_states['positions'] = torch.cat(obstacle_states['positions'], dim=0)
+        if len(obstacle_states['velocities']) > 0:
+            obstacle_states['velocities'] = torch.cat(obstacle_states['velocities'], dim=0)
+        return obstacle_states
+    
+    return {}
+
+
+def generate_full_episodes_with_moving_obstacles(
     env_id,
     robot_id,
-    num_trajectories_per_context,
     results_dir,
+    num_trajectories_per_context=1,
     threshold_start_goal_pos=1.0,
     obstacle_cutoff_margin=0.03,
     n_tries=1000,
@@ -29,19 +86,17 @@ def generate_collision_free_trajectories(
     gpmp_opt_iters=500,
     n_support_points=64,
     duration=5.0,
+    max_steps=100,  # max number of steps per episode to prevent infinite loops
+    goal_reach_threshold=0.05,  # threshold to consider goal reached
     tensor_args=None,
     debug=False,
 ):
     # -------------------------------- Load env, robot, task ---------------------------------
-    # Environment
     env_class = getattr(environments, env_id)
     env = env_class(tensor_args=tensor_args)
-
-    # Robot
     robot_class = getattr(robots, robot_id)
     robot = robot_class(tensor_args=tensor_args)
 
-    # Task
     task = PlanningTask(
         env=env,
         robot=robot,
@@ -60,13 +115,9 @@ def generate_collision_free_trajectories(
             break
 
     if start_state_pos is None or goal_state_pos is None:
-        raise ValueError(f"No collision free configuration was found\n"
-                         f"start_state_pos: {start_state_pos}\n"
-                         f"goal_state_pos:  {goal_state_pos}\n")
+        raise ValueError(f"No suitable start/goal found.")
 
-    n_trajectories = num_trajectories_per_context
-
-    # -------------------------------- Hybrid Planner ---------------------------------
+    # -------------------------------- Planner Setup ---------------------------------
     # Sample-based planner
     rrt_connect_default_params_env = env.get_rrt_connect_params(robot=robot)
     rrt_connect_default_params_env['max_time'] = rrt_max_time
@@ -79,11 +130,9 @@ def generate_collision_free_trajectories(
         tensor_args=tensor_args,
     )
     sample_based_planner_base = RRTConnect(**rrt_connect_params)
-    # sample_based_planner_base = RRTStar(**rrt_connect_params)
-    # sample_based_planner = sample_based_planner_base
     sample_based_planner = MultiSampleBasedPlanner(
         sample_based_planner_base,
-        n_trajectories=n_trajectories,
+        n_trajectories=num_trajectories_per_context,
         max_processes=-1,
         optimize_sequentially=True
     )
@@ -98,138 +147,173 @@ def generate_collision_free_trajectories(
         **gpmp_default_params_env,
         robot=robot,
         n_dof=robot.q_dim,
-        num_particles_per_goal=n_trajectories,
+        num_particles_per_goal=num_trajectories_per_context,
         start_state=start_state_pos,
-        multi_goal_states=goal_state_pos.unsqueeze(0),  # add batch dim for interface,
+        multi_goal_states=goal_state_pos.unsqueeze(0),  # add batch dim for interface
         collision_fields=task.get_collision_fields(),
         tensor_args=tensor_args,
     )
     opt_based_planner = GPMP2(**planner_params)
 
-    ###############
-    # Hybrid planner
     planner = HybridPlanner(
         sample_based_planner,
         opt_based_planner,
         tensor_args=tensor_args
     )
 
-    # Optimize
-    trajs_iters = planner.optimize(debug=debug, print_times=True, return_iterations=True)
-    trajs_last_iter = trajs_iters[-1]
+    # -------------------------------- Episode Simulation ---------------------------------
+    # We'll simulate a full episode:
+    # At each timestep:
+    # 1. Get current state (agent pos, goal, obstacle positions/velocities)
+    # 2. Plan full trajectory to goal
+    # 3. Execute one step
+    # 4. Update obstacles, store data
+    # until goal is reached or max steps
+    agent_pos = start_state_pos.clone()
+    all_agent_positions = []
+    all_obstacle_positions = []
+    all_obstacle_velocities = []
 
-    # -------------------------------- Save trajectories ---------------------------------
-    print(f'----------------STATISTICS----------------')
-    print(f'percentage free trajs: {task.compute_fraction_free_trajs(trajs_last_iter)*100:.2f}')
-    print(f'percentage collision intensity {task.compute_collision_intensity_trajs(trajs_last_iter)*100:.2f}')
-    print(f'success {task.compute_success_free_trajs(trajs_last_iter)}')
+    # initial states
+    # Assuming environment or task has a method to get obstacle states
+    # If not, you may need to query env.obj_extra_list or env.obj_fixed_list that hold dynamic objects
+    initial_obstacle_state = get_obstacle_states_from_env(env)
+    initial_obstacle_positions = initial_obstacle_state.get('positions', None)
+    initial_obstacle_velocities = initial_obstacle_state.get('velocities', None)
 
-    # save
-    torch.cuda.empty_cache()
-    trajs_last_iter_coll, trajs_last_iter_free = task.get_trajs_collision_and_free(trajs_last_iter)
-    if trajs_last_iter_coll is None:
-        trajs_last_iter_coll = torch.empty(0)
-    torch.save(trajs_last_iter_coll, os.path.join(results_dir, f'trajs-collision.pt'))
-    if trajs_last_iter_free is None:
-        trajs_last_iter_free = torch.empty(0)
-    torch.save(trajs_last_iter_free, os.path.join(results_dir, f'trajs-free.pt'))
-
-    # save results data dict
-    trajs_iters_coll, trajs_iters_free = task.get_trajs_collision_and_free(trajs_iters[-1])
-    results_data_dict = {
-        'duration': duration,
-        'n_support_points': n_support_points,
-        'dt': planner_params['dt'],
-        'trajs_iters_coll': trajs_iters_coll.unsqueeze(0) if trajs_iters_coll is not None else None,
-        'trajs_iters_free': trajs_iters_free.unsqueeze(0) if trajs_iters_free is not None else None,
+    # store initial state
+    initial_state_dict = {
+        'start': start_state_pos.cpu().numpy(),
+        'goal': goal_state_pos.cpu().numpy(),
+        'obstacle_positions': initial_obstacle_positions.cpu().numpy() if initial_obstacle_positions is not None else None,
+        'obstacle_velocities': initial_obstacle_velocities.cpu().numpy() if initial_obstacle_velocities is not None else None
     }
 
-    with open(os.path.join(results_dir, f'results_data_dict.pickle'), 'wb') as handle:
-        pickle.dump(results_data_dict, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # Lists to store the sequence of states
+    # We'll store at each step:
+    #   agent position
+    #   obstacle positions
+    #   (velocities stay the same if constant; if they change, store them too)
+    for step_i in range(max_steps):
+        # Update planner params with current start and goal
+        planner.sample_based_planner.planner.start_state_pos = agent_pos
+        planner.opt_based_planner.start_state = agent_pos
+        planner.opt_based_planner.multi_goal_states = goal_state_pos.unsqueeze(0)
 
-    # -------------------------------- Visualize ---------------------------------
+        # Plan trajectory
+        trajs_iters = planner.optimize(debug=debug, print_times=False, return_iterations=True)
+        trajs_last_iter = trajs_iters[-1]
+
+        # Pick a trajectory (if multiple)
+        chosen_traj = trajs_last_iter[0]  # assuming the first is good enough
+
+        # Check if a solution was found
+        # If no feasible trajectory found, break or handle failure
+        if chosen_traj is None:
+            print("No trajectory found at step:", step_i)
+            break
+
+        # Extract next step
+        # The trajectory is shape: (time, dof)
+        # We execute just the next configuration
+        next_agent_pos = chosen_traj[1].clone()  # the first config is current state, second is next step
+        all_agent_positions.append(agent_pos.cpu().numpy())
+
+        # Store obstacle states at this step (before updating)
+        current_obstacle_state = get_obstacle_states_from_env(env)
+        if current_obstacle_state:
+            all_obstacle_positions.append(current_obstacle_state['positions'].cpu().numpy())
+            all_obstacle_velocities.append(current_obstacle_state['velocities'].cpu().numpy())
+
+        # Update agent position
+        agent_pos = next_agent_pos
+
+        # Check if goal reached
+        if torch.linalg.norm(agent_pos - goal_state_pos) < goal_reach_threshold:
+            print("Goal reached at step:", step_i)
+            all_agent_positions.append(agent_pos.cpu().numpy())
+            # Store last obstacle state too
+            current_obstacle_state = get_obstacle_states_from_env(env)
+            if current_obstacle_state:
+                all_obstacle_positions.append(current_obstacle_state['positions'].cpu().numpy())
+                all_obstacle_velocities.append(current_obstacle_state['velocities'].cpu().numpy())
+            break
+
+        # Move environment forward (obstacles move)
+        env.step()
+
+    # Convert all stored data into arrays
+    all_agent_positions = np.array(all_agent_positions)
+    all_obstacle_positions = np.array(all_obstacle_positions) if len(all_obstacle_positions) > 0 else None
+    all_obstacle_velocities = np.array(all_obstacle_velocities) if len(all_obstacle_velocities) > 0 else None
+
+    # Save the collected episode data
+    episode_data = {
+        'initial_state': initial_state_dict,
+        'agent_positions': all_agent_positions,
+        'obstacle_positions_sequence': all_obstacle_positions,
+        'obstacle_velocities_sequence': all_obstacle_velocities
+    }
+
+    with open(os.path.join(results_dir, f'episode_data.pickle'), 'wb') as handle:
+        pickle.dump(episode_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # Optional: visualize the final trajectory
     planner_visualizer = PlanningVisualizer(task=task)
-
-    trajs = trajs_last_iter_free
-    pos_trajs = robot.get_position(trajs)
-    start_state_pos = pos_trajs[0][0]
-    goal_state_pos = pos_trajs[0][-1]
-
     fig, axs = planner_visualizer.plot_joint_space_state_trajectories(
-        trajs=trajs,
-        pos_start_state=start_state_pos, pos_goal_state=goal_state_pos,
-        vel_start_state=torch.zeros_like(start_state_pos), vel_goal_state=torch.zeros_like(goal_state_pos),
+        trajs=torch.tensor(all_agent_positions, device=tensor_args['device']).unsqueeze(0),
+        pos_start_state=all_agent_positions[0],
+        pos_goal_state=goal_state_pos.cpu().numpy(),
+        vel_start_state=np.zeros_like(all_agent_positions[0]),
+        vel_goal_state=np.zeros_like(goal_state_pos.cpu().numpy()),
     )
-
-    # save figure
-    fig.savefig(os.path.join(results_dir, f'trajectories.png'), dpi=300)
+    fig.savefig(os.path.join(results_dir, f'episode_trajectory.png'), dpi=300)
     plt.close(fig)
 
-    num_trajectories_coll, num_trajectories_free = len(trajs_last_iter_coll), len(trajs_last_iter_free)
-    return num_trajectories_coll, num_trajectories_free
+    return True
 
 
 @single_experiment_yaml
 def experiment(
-    # env_id: str = 'EnvDense2D',
-    # env_id: str = 'EnvSimple2D',
-    # env_id: str = 'EnvNarrowPassageDense2D',
-    env_id: str = 'EnvSpheres3D',
-
-    # robot_id: str = 'RobotPointMass',
-    robot_id: str = 'RobotPanda',
-
+    env_id: str = 'EnvDense2D',
+    robot_id: str = 'RobotPointMass',
     n_support_points: int = 64,
     duration: float = 5.0,  # seconds
-
-    # threshold_start_goal_pos: float = 1.0,
-    threshold_start_goal_pos: float = 1.83,
-
+    threshold_start_goal_pos: float = 1.0,
     obstacle_cutoff_margin: float = 0.05,
-
-    num_trajectories: int = 5,
-
-    # device: str = 'cpu',
+    num_trajectories: int = 1,
     device: str = 'cuda',
-
     debug: bool = True,
-
-    #######################################
-    # MANDATORY
     seed: int = int(time.time()),
-    # seed: int = 0,
-    # seed: int = 1679258088,
     results_dir: str = f"data",
-
-    #######################################
     **kwargs
 ):
     if debug:
         fix_random_seed(seed)
 
-    print(f'\n\n-------------------- Generating data --------------------')
+    print(f'\n\n-------------------- Generating full episode data --------------------')
     print(f'Seed:  {seed}')
     print(f'Env:   {env_id}')
     print(f'Robot: {robot_id}')
     print(f'num_trajectories: {num_trajectories}')
 
-    ####################################################################################################################
     tensor_args = {'device': device, 'dtype': torch.float32}
 
     metadata = {
         'env_id': env_id,
         'robot_id': robot_id,
-        'num_trajectories': num_trajectories
+        'num_trajectories': num_trajectories,
+        'episode_type': 'dynamic_obstacles_full_episode'
     }
+    os.makedirs(results_dir, exist_ok=True)
     with open(os.path.join(results_dir, 'metadata.yaml'), 'w') as f:
         yaml.dump(metadata, f, Dumper=yaml.Dumper)
 
-    # Generate trajectories
-    num_trajectories_coll, num_trajectories_free = generate_collision_free_trajectories(
+    success = generate_full_episodes_with_moving_obstacles(
         env_id,
         robot_id,
-        num_trajectories,
-        results_dir,
+        results_dir=results_dir,
+        num_trajectories_per_context=num_trajectories,
         threshold_start_goal_pos=threshold_start_goal_pos,
         obstacle_cutoff_margin=obstacle_cutoff_margin,
         n_support_points=n_support_points,
@@ -238,13 +322,10 @@ def experiment(
         debug=debug,
     )
 
-    metadata.update(
-        num_trajectories_generated=num_trajectories_coll + num_trajectories_free,
-        num_trajectories_generated_coll=num_trajectories_coll,
-        num_trajectories_generated_free=num_trajectories_free,
-    )
-    with open(os.path.join(results_dir, 'metadata.yaml'), 'w') as f:
-        yaml.dump(metadata, f, Dumper=yaml.Dumper)
+    if success:
+        print("Episode generation completed successfully.")
+    else:
+        print("Episode generation failed or incomplete.")
 
 
 if __name__ == '__main__':

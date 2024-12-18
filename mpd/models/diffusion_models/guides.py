@@ -6,8 +6,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from mp_baselines.planners.costs.cost_functions import CostGPTrajectory
-from mp_baselines.planners.costs.factors.mp_priors_multi import MultiMPPrior
+from deps.motion_planning_baselines.mp_baselines.planners.costs.cost_functions import CostGPTrajectory
+from deps.motion_planning_baselines.mp_baselines.planners.costs.factors.mp_priors_multi import MultiMPPrior
 from torch_robotics.torch_planning_objectives.fields.distance_fields import interpolate_points_v1
 from torch_robotics.torch_utils.torch_utils import to_torch
 
@@ -398,34 +398,34 @@ class GuideTrajectoryLastPoint(GuideBase):
         return objective
 
 
-class GuideTrajectoryObstacleAvoidanceMultiSphere(GuideBase):
-    """
-    Computes the sdf for all points in a trajectory
-    """
-    def __init__(self, obstacles, tensor_args=None, **kwargs):
+class GuideTrajectoryObstacleAvoidanceDynamic(GuideBase):
+    """Guide that considers obstacle velocities when computing costs"""
+    def __init__(self, obstacles, velocities, dt, prediction_horizon=5, **kwargs):
         super().__init__(**kwargs)
-        obst_params = dict(obst_type='sdf')
-        self.shape = MultiSphere(tensor_args, **obst_params)
-        self.convert_obstacles_to_shape(obstacles)
+        self.obstacles = obstacles
+        self.velocities = velocities
+        self.dt = dt
+        self.prediction_horizon = prediction_horizon
         self._max_sdf = 0.02
-
-    def convert_obstacles_to_shape(self, obstacles):
-        centers = []
-        radii = []
-        for obstacle in obstacles:
-            assert isinstance(obstacle, ObstacleSphere), "Only accepts circles for now"
-            centers.append(obstacle.get_center())
-            radii.append(obstacle.radius)
-        centers = np.array(centers)
-        radii = np.array(radii)
-        self.shape.set_obst(centers=centers, radii=radii)
-
+        
     def forward(self, x):
-        sdf_points = self.shape.compute_cost(x)
-        cost_points = torch.relu(self._max_sdf - sdf_points)
-        # cost_points = smooth_distance_penalty(sdf_points)
-        cost_trajectory = cost_points.sum(-1)
-        return -1 * cost_trajectory  # maximize
+        # x: [batch, horizon, dim]
+        total_cost = torch.zeros(x.shape[0], device=x.device)
+        
+        # For each timestep in trajectory
+        for t in range(x.shape[1]):
+            # Predict obstacle positions at this timestep
+            t_offset = t * self.dt
+            obstacle_positions = self.obstacles + self.velocities * t_offset
+            
+            # Calculate distances to predicted obstacle positions
+            dists = torch.cdist(x[:, t:t+1], obstacle_positions)
+            
+            # Collision cost (higher when closer to obstacles)
+            cost_t = torch.exp(-dists / self._max_sdf)
+            total_cost += cost_t.sum(-1)
+            
+        return -1 * total_cost  # maximize (negative cost)
 
 
 

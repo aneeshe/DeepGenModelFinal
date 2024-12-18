@@ -3,11 +3,27 @@ from abc import ABC, abstractmethod
 import einops
 import torch
 from matplotlib import pyplot as plt
+import sys
+import os
 
-from storm_kit.geom.nn_model.robot_self_collision import RobotSelfCollisionNet
+
+#from storm_kit.geom.nn_model.robot_self_collision import RobotSelfCollisionNet
 from torch_robotics.torch_kinematics_tree.geometrics.utils import SE3_distance
 from torch_robotics.visualizers.planning_visualizer import create_fig_and_axes
 import torch.nn.functional as Functional
+# Dynamically add the project root directory to Python path
+# Dynamically set the project root directory (parent of 'deps')
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(current_dir, "../../../../.."))  # Go up 5 levels
+
+print("Current directory:", current_dir)
+print("Project root directory:", project_root)
+
+# Add project root to the Python path
+if project_root not in sys.path:
+    sys.path.append(project_root)
+from deps.storm.storm_kit.geom.nn_model.robot_self_collision import RobotSelfCollisionNet
+
 
 
 class DistanceField(ABC):

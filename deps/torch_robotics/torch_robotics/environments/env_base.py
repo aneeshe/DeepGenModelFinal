@@ -277,8 +277,10 @@ class EnvBase(ABC):
     def get_chomp_params(self, robot=None):
         raise NotImplementedError
 
-    def step(self):
+    def step(self, dt = None):
         """Step the environment forward in time"""
+        if dt is not None:
+            self.dt = dt
         self.current_time += self.dt
         # Update positions of all dynamic objects
         for obj in self.obj_all_list:
@@ -335,4 +337,3 @@ if __name__ == '__main__':
     # Render gradient of sdf
     env.render_grad_sdf(ax, fig)
     plt.show()
-

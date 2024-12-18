@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import torch
 from einops._torch_specific import allow_ops_in_compiled_graph  # requires einops>=0.6.1
 
-from experiment_launcher import single_experiment_yaml, run_experiment
-from mp_baselines.planners.costs.cost_functions import CostCollision, CostComposite, CostGPTrajectory
+from deps.experiment_launcher.experiment_launcher import single_experiment_yaml, run_experiment
+from deps.motion_planning_baselines.mp_baselines.planners.costs.cost_functions import CostCollision, CostComposite, CostGPTrajectory
 from mpd.models import TemporalUnet, UNET_DIM_MULTS
 from mpd.models.diffusion_models.guides import GuideManagerTrajectoriesWithVelocity
 from mpd.models.diffusion_models.sample_functions import guide_gradient_steps, ddpm_sample_fn

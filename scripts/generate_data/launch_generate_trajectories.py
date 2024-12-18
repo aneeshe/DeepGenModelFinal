@@ -3,8 +3,8 @@ import socket
 
 import numpy as np
 
-from experiment_launcher import Launcher
-from experiment_launcher.utils import is_local
+from deps.experiment_launcher.experiment_launcher import Launcher
+from deps.experiment_launcher.experiment_launcher.utils import is_local
 
 ########################################################################################################################
 # EXPERIMENT PARAMETERS SETUP

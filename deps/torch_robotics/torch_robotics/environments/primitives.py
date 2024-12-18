@@ -96,7 +96,7 @@ class PrimitiveShapeField(ABC):
         print(f"Checking bounds for centers: {self.centers}")  # Debugging line
         for i in range(len(self.centers)):
             for dim in range(len(self.centers[i])):
-                if self.centers[i][dim] < limits[0][dim]:
+                if self.centers[i][dim ] < limits[0][dim]:
                     self.centers[i][dim] = limits[0][dim]
                     self.velocities[i][dim] *= -1  # Bounce off boundary
                 elif self.centers[i][dim] > limits[1][dim]:
